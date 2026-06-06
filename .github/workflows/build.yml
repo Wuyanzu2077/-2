@@ -1,0 +1,31 @@
+name: 编译EXE
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装 PyInstaller
+        run: pip install pyinstaller
+
+      - name: 编译为单文件 EXE
+        run: |
+          cd TimerOverlay
+          pyinstaller --onefile --noconsole --name "替身计时器" timer.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 替身计时器-EXE
+          path: TimerOverlay/dist/替身计时器.exe
+          retention-days: 30
