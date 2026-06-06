@@ -2,8 +2,9 @@
 """
 替身计时器 - Windows 悬浮窗版本
 - 全局热键触发（不抢游戏焦点）
-- 置顶半透明圆形悬浮窗
-- 可自定义触发键、倒计时秒数
+- 置顶透明背景悬浮窗
+- 鼠标悬停显示关闭按钮
+- 可自定义配置 config.json
 """
 
 import tkinter as tk
@@ -14,20 +15,16 @@ import sys
 import json
 import os
 
-# ============ 可自定义配置 ============
-# 配置文件会自动生成在 exe 同目录下的 config.json
-# 你可以编辑那个文件来改键位和秒数，不用重新编译
-
 DEFAULT_CONFIG = {
-    "hotkey": "F8",          # 触发键，支持 F1-F12、字母、数字
-    "countdown": 14,         # 倒计时秒数
-    "window_x": 100,         # 悬浮窗初始 X 坐标
-    "window_y": 100,         # 悬浮窗初始 Y 坐标
-    "circle_size": 80,       # 圆圈大小（像素）
-    "font_size": 34          # 数字字体大小
+    "hotkey": "F8",
+    "quit_hotkey": "F12",
+    "countdown": 14,
+    "window_x": 100,
+    "window_y": 100,
+    "circle_size": 80,
+    "font_size": 34
 }
 
-# 虚拟键码映射表
 VK_MAP = {
     "F1": 0x70, "F2": 0x71, "F3": 0x72, "F4": 0x73,
     "F5": 0x74, "F6": 0x75, "F7": 0x76, "F8": 0x77,
@@ -47,7 +44,20 @@ VK_MAP = {
 }
 
 WM_HOTKEY = 0x0312
-HOTKEY_ID = 1
+HOTKEY_TRIGGER = 1
+HOTKEY_QUIT = 2
+
+user32 = ctypes.windll.user32
+
+# Win32 常量
+GWL_EXSTYLE = -20
+WS_EX_LAYERED = 0x00080000
+WS_EX_NOACTIVATE = 0x08000000
+WS_EX_TOPMOST = 0x00000008
+WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_TRANSPARENT = 0x00000020
+LWA_COLORKEY = 0x00000001
+LWA_ALPHA = 0x00000002
 
 
 def get_config_path():
@@ -84,67 +94,121 @@ class TimerOverlay:
         self.size = config["circle_size"]
         self.remaining = self.total
         self.counting = False
+        self.hover = False
 
         self.root = tk.Tk()
         self.root.title("TimerOverlay")
-        self.root.overrideredirect(True)          # 无边框
-        self.root.attributes("-topmost", True)     # 置顶
-        self.root.attributes("-transparentcolor", "#010101")  # 把这个颜色变透明
+        self.root.overrideredirect(True)
+        self.root.attributes("-topmost", True)
+
+        # 用一个特定颜色作为透明色
+        self.TRANSPARENT_COLOR = "#01FF01"
+        self.root.config(bg=self.TRANSPARENT_COLOR)
 
         x = config["window_x"]
         y = config["window_y"]
-        self.root.geometry(f"{self.size}x{self.size}+{x}+{y}")
-        self.root.config(bg="#010101")
+        margin = 20  # 给关闭按钮留空间
+        total_w = self.size + margin
+        total_h = self.size + margin
+        self.root.geometry(f"{total_w}x{total_h}+{x}+{y}")
 
+        # 主画布
         self.canvas = tk.Canvas(
-            self.root, width=self.size, height=self.size,
-            bg="#010101", highlightthickness=0
+            self.root, width=total_w, height=total_h,
+            bg=self.TRANSPARENT_COLOR, highlightthickness=0
         )
         self.canvas.pack()
 
-        # 允许鼠标拖动悬浮窗
-        self.canvas.bind("<Button-1>", self.start_move)
+        # 关闭按钮（右上角），默认隐藏
+        self.close_btn = None
+
+        # 鼠标事件
+        self.canvas.bind("<Enter>", self.on_enter)
+        self.canvas.bind("<Leave>", self.on_leave)
+        self.canvas.bind("<Button-1>", self.on_click)
         self.canvas.bind("<B1-Motion>", self.do_move)
 
         self.draw(self.total, "#FF3333")
 
-        # 设置窗口不抢焦点
-        self.root.after(50, self.set_no_activate)
+        # 设置窗口透明 + 不抢焦点
+        self.root.after(50, self.setup_window)
 
         # 启动全局热键监听线程
         self.hotkey_thread = threading.Thread(target=self.hotkey_loop, daemon=True)
         self.hotkey_thread.start()
 
-    def set_no_activate(self):
-        try:
-            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
-            if not hwnd:
-                hwnd = self.root.winfo_id()
-            GWL_EXSTYLE = -20
-            WS_EX_NOACTIVATE = 0x08000000
-            WS_EX_TOPMOST = 0x00000008
-            WS_EX_TOOLWINDOW = 0x00000080
-            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            style = style | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
-        except Exception:
-            pass
+    def setup_window(self):
+        self.root.update_idletasks()
+        hwnd = user32.GetParent(self.root.winfo_id())
+        if not hwnd:
+            hwnd = self.root.winfo_id()
+        self.hwnd = hwnd
+
+        # 设置扩展样式
+        style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        style = style | WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+
+        # 把 TRANSPARENT_COLOR 设为透明色
+        # RGB: #01FF01 -> 0x0001FF01 (COLORREF is BGR: 0x0001FF01)
+        color_ref = 0x01 | (0xFF << 8) | (0x01 << 16)  # BGR format
+        ctypes.windll.user32.SetLayeredWindowAttributes(
+            hwnd, color_ref, 0, LWA_COLORKEY
+        )
 
     def draw(self, number, color):
-        self.canvas.delete("all")
+        self.canvas.delete("circle")
+        self.canvas.delete("number")
         pad = 4
-        # 半透明深色底圆（用接近透明色描边模拟）
+        ox = 0  # 圆形偏移
+        oy = 10  # 给关闭按钮上方留点空间
+        # 半透明深色底圆
         self.canvas.create_oval(
-            pad, pad, self.size - pad, self.size - pad,
-            fill="#1a1a1a", outline=color, width=3
+            ox + pad, oy + pad,
+            ox + self.size - pad, oy + self.size - pad,
+            fill="#1a1a1a", outline=color, width=3,
+            tags="circle"
         )
         self.canvas.create_text(
-            self.size // 2, self.size // 2,
+            ox + self.size // 2, oy + self.size // 2,
             text=str(number), fill=color,
-            font=("Consolas", self.config["font_size"], "bold")
+            font=("Consolas", self.config["font_size"], "bold"),
+            tags="number"
         )
 
-    def start_move(self, event):
+    def show_close_btn(self):
+        if self.close_btn is None:
+            self.close_btn = self.canvas.create_text(
+                self.size - 2, 10,
+                text="✕", fill="#FF4444",
+                font=("Arial", 12, "bold"),
+                tags="close_btn"
+            )
+            self.canvas.tag_bind("close_btn", "<Button-1>", self.on_close)
+
+    def hide_close_btn(self):
+        if self.close_btn is not None:
+            self.canvas.delete("close_btn")
+            self.close_btn = None
+
+    def on_enter(self, event):
+        self.hover = True
+        self.show_close_btn()
+
+    def on_leave(self, event):
+        self.hover = False
+        self.root.after(300, self._check_leave)
+
+    def _check_leave(self):
+        if not self.hover:
+            self.hide_close_btn()
+
+    def on_close(self, event):
+        self.root.quit()
+        self.root.destroy()
+        os._exit(0)
+
+    def on_click(self, event):
         self._mx = event.x
         self._my = event.y
 
@@ -162,8 +226,10 @@ class TimerOverlay:
             return "#FFFF00"
 
     def trigger(self):
-        # 由热键线程调用，切回主线程执行
         self.root.after(0, self._start_countdown)
+
+    def quit_app(self):
+        self.root.after(0, self.on_close, None)
 
     def _start_countdown(self):
         self.remaining = self.total
@@ -176,24 +242,28 @@ class TimerOverlay:
         self.draw(self.remaining, self.color_for(self.remaining))
         if self.remaining <= 0:
             self.counting = False
-            self.draw(self.total, "#FF3333")  # 恢复待机
+            self.draw(self.total, "#FF3333")
             return
         self.remaining -= 1
         self.root.after(1000, self._tick)
 
     def hotkey_loop(self):
-        user32 = ctypes.windll.user32
-        vk = VK_MAP.get(self.config["hotkey"].upper(), 0x77)  # 默认 F8
-        # 无修饰键注册全局热键
-        if not user32.RegisterHotKey(None, HOTKEY_ID, 0, vk):
-            return
+        vk_trigger = VK_MAP.get(self.config["hotkey"].upper(), 0x77)
+        vk_quit = VK_MAP.get(self.config["quit_hotkey"].upper(), 0x7B)
+
+        user32.RegisterHotKey(None, HOTKEY_TRIGGER, 0, vk_trigger)
+        user32.RegisterHotKey(None, HOTKEY_QUIT, 0, vk_quit)
+
         msg = wintypes.MSG()
         while True:
             ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
             if ret == 0 or ret == -1:
                 break
-            if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_ID:
-                self.trigger()
+            if msg.message == WM_HOTKEY:
+                if msg.wParam == HOTKEY_TRIGGER:
+                    self.trigger()
+                elif msg.wParam == HOTKEY_QUIT:
+                    self.quit_app()
 
     def run(self):
         self.root.mainloop()
