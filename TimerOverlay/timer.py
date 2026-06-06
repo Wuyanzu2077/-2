@@ -225,7 +225,7 @@ class TimerOverlay:
         else:
             return "#FFFF00"
 
-   def trigger(self):
+    def trigger(self):
         if not self.counting:
             self.root.after(0, self._start_countdown)
 
